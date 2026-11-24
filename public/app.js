@@ -61,6 +61,9 @@ let activeObject = null;
 
 /** 10 MiB parts — above R2's 5 MiB minimum, under the ~100 MiB Worker request limit. */
 const PART_SIZE = 10 * 1024 * 1024;
+/** Soft ceiling matching the Worker request body limit — parts must stay under this. */
+const MULTIPART_PART_SOFT_MAX = 90 * 1024 * 1024;
+/** Anything larger must use multipart — a single Worker request caps around ~100 MiB. */
 const SIMPLE_UPLOAD_MAX = 20 * 1024 * 1024;
 
 const VIDEO_EXT = new Set([
@@ -329,10 +332,13 @@ class UploadController {
 
 	updateProgress() {
 		if (!this.file) return;
-		const completedBytes = Math.min(this.file.size, (this.nextPart - 1) * PART_SIZE);
-		const pct = this.file.size === 0 ? 100 : Math.min(100, Math.round((completedBytes / this.file.size) * 100));
+		const size = this.fileSize();
+		const completedBytes = Math.min(size, Math.max(0, this.nextPart - 1) * PART_SIZE);
+		const pct = size === 0 ? 100 : Math.min(100, Math.round((completedBytes / size) * 100));
+		const partCurrent = Math.min(Math.max(this.nextPart, 1), Math.max(this.totalParts, 1));
+		const partTotal = Math.max(this.totalParts, 1);
 		uploadProgressBar.style.width = `${pct}%`;
-		uploadProgressLabel.textContent = `${pct}% · ${formatBytes(completedBytes)} / ${formatBytes(this.file.size)} · part ${Math.min(this.nextPart, this.totalParts)}/${this.totalParts}`;
+		uploadProgressLabel.textContent = `${pct}% · ${formatBytes(completedBytes)} / ${formatBytes(size)} · part ${partCurrent}/${partTotal}`;
 		uploadFileName.textContent = this.file.name;
 	}
 
@@ -413,6 +419,26 @@ class UploadController {
 		this.drainQueue();
 	}
 
+	fileSize(file = this.file) {
+		const n = Number(file?.size);
+		return Number.isFinite(n) && n >= 0 ? n : 0;
+	}
+
+	needsMultipart(file = this.file) {
+		if (this.uploadId) return true;
+		return this.fileSize(file) > SIMPLE_UPLOAD_MAX;
+	}
+
+	guessContentType(file) {
+		if (file.type) return file.type;
+		const ext = extOf(file.name);
+		if (ext === "mkv") return "video/x-matroska";
+		if (ext === "mp4" || ext === "m4v") return "video/mp4";
+		if (ext === "webm") return "video/webm";
+		if (IMAGE_EXT.has(ext)) return `image/${ext === "jpg" ? "jpeg" : ext}`;
+		return "application/octet-stream";
+	}
+
 	async drainQueue() {
 		if (this.busy) return;
 		const next = this.queue.shift();
@@ -425,10 +451,14 @@ class UploadController {
 		this.key = "";
 		this.uploadId = "";
 		this.parts.clear();
-		this.totalParts = Math.max(1, Math.ceil(next.size / PART_SIZE));
+		const size = this.fileSize(next);
+		this.totalParts = this.needsMultipart(next)
+			? Math.max(1, Math.ceil(size / PART_SIZE))
+			: 1;
 		this.nextPart = 1;
 		this.state = "running";
 		uploadPanel.classList.remove("hidden");
+		uploadFileName.textContent = next.name;
 		this.updateProgress();
 		this.setControls();
 		try {
@@ -442,17 +472,38 @@ class UploadController {
 		try {
 			if (!this.file) return;
 			let uploadedKey = this.file.name;
-			if (this.file.size <= SIMPLE_UPLOAD_MAX && !this.uploadId) {
-				setStatus(uploadStatus, `Uploading ${this.file.name} (${formatBytes(this.file.size)})…`, "");
-				uploadProgressBar.style.width = "50%";
-				uploadProgressLabel.textContent = `… · ${formatBytes(this.file.size)}`;
-				const result = await this.uploadSimple(this.file);
-				uploadedKey = result.key || this.file.name;
-				uploadProgressBar.style.width = "100%";
-				uploadProgressLabel.textContent = `100% · ${formatBytes(this.file.size)} / ${formatBytes(this.file.size)}`;
-			} else {
+			const size = this.fileSize();
+
+			if (this.needsMultipart()) {
+				this.totalParts = Math.max(this.totalParts, Math.max(1, Math.ceil(size / PART_SIZE)));
+				setStatus(
+					uploadStatus,
+					`Chunked upload · ${formatBytes(size)} · ${this.totalParts} parts…`,
+					"",
+				);
+				this.updateProgress();
 				await this.uploadMultipart();
 				uploadedKey = this.key || this.file.name;
+			} else {
+				setStatus(uploadStatus, `Uploading ${this.file.name} (${formatBytes(size)})…`, "");
+				uploadProgressBar.style.width = "50%";
+				uploadProgressLabel.textContent = `50% · 0 B / ${formatBytes(size)} · single request`;
+				try {
+					const result = await this.uploadSimple(this.file);
+					uploadedKey = result.key || this.file.name;
+				} catch (err) {
+					// Cloudflare may 413 before our Worker JSON body is returned.
+					if (this.isTooLargeError(err)) {
+						setStatus(uploadStatus, "File too large for a single request — switching to chunked upload…", "");
+						this.totalParts = Math.max(1, Math.ceil(size / PART_SIZE));
+						this.nextPart = 1;
+						this.updateProgress();
+						await this.uploadMultipart();
+						uploadedKey = this.key || this.file.name;
+					} else {
+						throw err;
+					}
+				}
 			}
 			if (this.state === "cancelled") return;
 
@@ -462,7 +513,7 @@ class UploadController {
 			const doneName = this.file.name;
 			this.state = "done";
 			uploadProgressBar.style.width = "100%";
-			uploadProgressLabel.textContent = `100% · ${formatBytes(this.file.size)} / ${formatBytes(this.file.size)}`;
+			uploadProgressLabel.textContent = `100% · ${formatBytes(size)} / ${formatBytes(size)} · done`;
 			setStatus(uploadStatus, `Uploaded ${doneName}.`, "ok");
 			uploadPauseBtn.classList.add("hidden");
 			uploadResumeBtn.classList.add("hidden");
@@ -516,27 +567,44 @@ class UploadController {
 		}
 	}
 
+	isTooLargeError(err) {
+		const msg = String(err?.message || err || "");
+		return /\b413\b/.test(msg) || /too large/i.test(msg) || /useMultipart/i.test(msg);
+	}
+
 	async uploadSimple(file) {
+		const size = this.fileSize(file);
+		if (size > SIMPLE_UPLOAD_MAX) {
+			throw new Error(`File is too large for a single request (${formatBytes(size)}). Use chunked multipart upload.`);
+		}
 		const body = new FormData();
 		body.append("file", file, file.name);
 		this.abortController = new AbortController();
 		const res = await fetch("/api/upload", { method: "POST", body, signal: this.abortController.signal });
 		const data = await res.json().catch(() => ({}));
-		if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+		if (!res.ok) {
+			const err = new Error(data.error || `Request failed (${res.status})`);
+			if (res.status === 413 || data.useMultipart) err.useMultipart = true;
+			throw err;
+		}
 		this.key = data.key || file.name;
 		return data;
 	}
 
 	async uploadMultipart() {
 		if (!this.file) return;
+		const size = this.fileSize();
+		this.totalParts = Math.max(1, Math.ceil(size / PART_SIZE));
+
 		if (!this.uploadId) {
-			setStatus(uploadStatus, `Starting multipart for ${this.file.name}…`, "");
+			setStatus(uploadStatus, `Starting chunked upload for ${this.file.name}…`, "");
+			this.updateProgress();
 			const created = await api("/api/multipart/create", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
 					key: this.file.name,
-					contentType: this.file.type || "application/octet-stream",
+					contentType: this.guessContentType(this.file),
 					originalName: this.file.name,
 				}),
 			});
@@ -556,8 +624,13 @@ class UploadController {
 			}
 
 			const start = (partNumber - 1) * PART_SIZE;
-			const end = Math.min(start + PART_SIZE, this.file.size);
+			const end = Math.min(start + PART_SIZE, size);
 			const blob = this.file.slice(start, end);
+			if (blob.size > MULTIPART_PART_SOFT_MAX) {
+				throw new Error(
+					`Part ${partNumber} is ${formatBytes(blob.size)} — exceeds Worker body limit. Reduce part size.`,
+				);
+			}
 			const qs = new URLSearchParams({
 				key: this.key,
 				uploadId: this.uploadId,
@@ -566,6 +639,7 @@ class UploadController {
 
 			this.abortController = new AbortController();
 			setStatus(uploadStatus, `Uploading part ${partNumber}/${this.totalParts}…`, "");
+			this.updateProgress();
 
 			let res;
 			try {

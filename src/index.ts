@@ -632,8 +632,12 @@ export default {
 				});
 			}
 
-			if (url.pathname === "/styles.css") {
-				return env.ASSETS.fetch(request);
+			// Static assets needed before/with auth — avoid login redirects and stale caches.
+			if (url.pathname === "/styles.css" || url.pathname === "/app.js") {
+				const res = await env.ASSETS.fetch(request);
+				const headers = new Headers(res.headers);
+				headers.set("Cache-Control", "no-store");
+				return new Response(res.body, { status: res.status, headers });
 			}
 
 			const session = await readSession(request, env, config);
