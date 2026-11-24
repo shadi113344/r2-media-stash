@@ -62,6 +62,55 @@ body {
 	animation: rise 0.7s ease both;
 }
 
+.brand-actions {
+	margin: 1rem 0 0;
+}
+
+.login-shell {
+	padding-top: 4.5rem;
+}
+
+.login-card {
+	display: grid;
+	gap: 0.75rem;
+	padding: 1.5rem;
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow);
+	backdrop-filter: blur(10px);
+	max-width: 26rem;
+}
+
+.login-label {
+	font-weight: 600;
+	font-size: 0.95rem;
+}
+
+.login-card input[type="password"] {
+	width: 100%;
+	padding: 0.75rem 0.85rem;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	font: inherit;
+	background: #fff;
+	color: var(--ink);
+}
+
+.login-card input[type="password"]:focus {
+	outline: 2px solid rgba(15, 118, 110, 0.35);
+	border-color: var(--accent);
+}
+
+.login-card .btn {
+	justify-self: start;
+}
+
+.login-card code {
+	font-family: var(--mono);
+	font-size: 0.85em;
+}
+
 .mark {
 	margin: 0;
 	font-size: clamp(2rem, 5vw, 3rem);
