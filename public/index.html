@@ -33,7 +33,22 @@
 						<p class="dropzone-hint">Images, videos, documents — large files upload in chunks (multi‑GB supported)</p>
 						<button type="button" id="browse-btn" class="btn primary">Choose files</button>
 					</div>
-					<div id="upload-status" class="status" role="status" aria-live="polite"></div>
+					<div id="upload-panel" class="upload-panel hidden" aria-live="polite">
+						<div class="upload-panel-head">
+							<p id="upload-file-name" class="upload-file-name"></p>
+							<p id="upload-status" class="status" role="status"></p>
+						</div>
+						<div class="progress-track" aria-hidden="true">
+							<div id="upload-progress-bar" class="progress-bar"></div>
+						</div>
+						<p id="upload-progress-label" class="progress-label">0%</p>
+						<div class="upload-controls">
+							<button type="button" id="upload-pause-btn" class="btn ghost">Pause</button>
+							<button type="button" id="upload-resume-btn" class="btn primary hidden">Resume</button>
+							<button type="button" id="upload-retry-btn" class="btn ghost hidden">Retry</button>
+							<button type="button" id="upload-cancel-btn" class="btn danger">Cancel</button>
+						</div>
+					</div>
 				</form>
 			</section>
 

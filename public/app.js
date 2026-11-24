@@ -2,6 +2,14 @@ const fileInput = document.getElementById("file-input");
 const browseBtn = document.getElementById("browse-btn");
 const dropzone = document.getElementById("upload-form");
 const uploadStatus = document.getElementById("upload-status");
+const uploadPanel = document.getElementById("upload-panel");
+const uploadFileName = document.getElementById("upload-file-name");
+const uploadProgressBar = document.getElementById("upload-progress-bar");
+const uploadProgressLabel = document.getElementById("upload-progress-label");
+const uploadPauseBtn = document.getElementById("upload-pause-btn");
+const uploadResumeBtn = document.getElementById("upload-resume-btn");
+const uploadRetryBtn = document.getElementById("upload-retry-btn");
+const uploadCancelBtn = document.getElementById("upload-cancel-btn");
 const objectList = document.getElementById("object-list");
 const emptyState = document.getElementById("empty-state");
 const refreshBtn = document.getElementById("refresh-btn");
@@ -25,6 +33,10 @@ let objectsCache = [];
 /** @type {Array<{id: string, label: string, objectKeys: string[]}>} */
 let friendsCache = [];
 
+/** 10 MiB parts — above R2's 5 MiB minimum, under the ~100 MiB Worker request limit. */
+const PART_SIZE = 10 * 1024 * 1024;
+const SIMPLE_UPLOAD_MAX = 20 * 1024 * 1024;
+
 function setStatus(el, message, kind = "") {
 	el.textContent = message;
 	el.className = `status${kind ? ` ${kind}` : ""}`;
@@ -39,12 +51,333 @@ function escapeHtml(value) {
 		.replaceAll("'", "&#39;");
 }
 
+function formatBytes(n) {
+	if (n < 1024) return `${n} B`;
+	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+	if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+	return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 async function api(path, options) {
 	const res = await fetch(path, options);
 	const data = await res.json().catch(() => ({}));
 	if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
 	return data;
 }
+
+class UploadController {
+	constructor() {
+		/** @type {'idle'|'running'|'paused'|'error'|'cancelled'|'done'} */
+		this.state = "idle";
+		/** @type {File|null} */
+		this.file = null;
+		this.key = "";
+		this.uploadId = "";
+		/** @type {Map<number, {partNumber: number, etag: string}>} */
+		this.parts = new Map();
+		this.totalParts = 0;
+		this.nextPart = 1;
+		this.abortController = null;
+		this.pauseWaiters = [];
+		this.queue = [];
+		this.busy = false;
+	}
+
+	setControls() {
+		const active = this.state === "running" || this.state === "paused" || this.state === "error";
+		uploadPanel.classList.toggle("hidden", this.state === "idle" || this.state === "done");
+		if (this.state === "done") {
+			// keep panel visible briefly with success, then hide on next idle
+		}
+		if (this.state !== "idle") uploadPanel.classList.remove("hidden");
+
+		uploadPauseBtn.classList.toggle("hidden", this.state !== "running");
+		uploadResumeBtn.classList.toggle("hidden", this.state !== "paused");
+		uploadRetryBtn.classList.toggle("hidden", this.state !== "error");
+		uploadCancelBtn.disabled = this.state === "idle" || this.state === "done" || this.state === "cancelled";
+		browseBtn.disabled = this.busy || this.queue.length > 0 || this.state === "running" || this.state === "paused";
+	}
+
+	updateProgress() {
+		if (!this.file) return;
+		const completedBytes = Math.min(this.file.size, (this.nextPart - 1) * PART_SIZE);
+		const pct = this.file.size === 0 ? 100 : Math.min(100, Math.round((completedBytes / this.file.size) * 100));
+		uploadProgressBar.style.width = `${pct}%`;
+		uploadProgressLabel.textContent = `${pct}% · ${formatBytes(completedBytes)} / ${formatBytes(this.file.size)} · part ${Math.min(this.nextPart, this.totalParts)}/${this.totalParts}`;
+		uploadFileName.textContent = this.file.name;
+	}
+
+	async waitIfPaused() {
+		while (this.state === "paused") {
+			await new Promise((resolve) => this.pauseWaiters.push(resolve));
+		}
+		if (this.state === "cancelled") throw new Error("Upload cancelled");
+	}
+
+	pause() {
+		if (this.state !== "running") return;
+		this.state = "paused";
+		this.abortController?.abort();
+		setStatus(uploadStatus, "Paused.", "");
+		this.setControls();
+	}
+
+	resume() {
+		if (this.state !== "paused") return;
+		this.state = "running";
+		setStatus(uploadStatus, "Resuming…", "");
+		this.setControls();
+		const waiters = this.pauseWaiters.splice(0);
+		for (const resolve of waiters) resolve();
+	}
+
+	async cancel() {
+		if (this.state === "idle" || this.state === "done") return;
+		this.state = "cancelled";
+		this.abortController?.abort();
+		const waiters = this.pauseWaiters.splice(0);
+		for (const resolve of waiters) resolve();
+		if (this.uploadId && this.key) {
+			try {
+				await api("/api/multipart/abort", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ key: this.key, uploadId: this.uploadId }),
+				});
+			} catch {
+				/* ignore */
+			}
+		}
+		setStatus(uploadStatus, "Upload cancelled.", "error");
+		this.setControls();
+		this.resetSession();
+		this.busy = false;
+		this.drainQueue();
+	}
+
+	retry() {
+		if (this.state !== "error" || !this.file) return;
+		this.state = "running";
+		setStatus(uploadStatus, "Retrying…", "");
+		this.setControls();
+		this.runCurrent().catch(() => {});
+	}
+
+	resetSession() {
+		this.file = null;
+		this.key = "";
+		this.uploadId = "";
+		this.parts.clear();
+		this.totalParts = 0;
+		this.nextPart = 1;
+		this.abortController = null;
+		this.state = "idle";
+		uploadProgressBar.style.width = "0%";
+		uploadProgressLabel.textContent = "0%";
+		uploadFileName.textContent = "";
+		this.setControls();
+		uploadPanel.classList.add("hidden");
+	}
+
+	enqueue(files) {
+		this.queue.push(...files);
+		this.drainQueue();
+	}
+
+	async drainQueue() {
+		if (this.busy) return;
+		const next = this.queue.shift();
+		if (!next) {
+			browseBtn.disabled = false;
+			return;
+		}
+		this.busy = true;
+		this.file = next;
+		this.key = "";
+		this.uploadId = "";
+		this.parts.clear();
+		this.totalParts = Math.max(1, Math.ceil(next.size / PART_SIZE));
+		this.nextPart = 1;
+		this.state = "running";
+		uploadPanel.classList.remove("hidden");
+		this.updateProgress();
+		this.setControls();
+		try {
+			await this.runCurrent();
+		} catch {
+			/* surfaced via status */
+		}
+	}
+
+	async runCurrent() {
+		try {
+			if (!this.file) return;
+			if (this.file.size <= SIMPLE_UPLOAD_MAX && !this.uploadId) {
+				setStatus(uploadStatus, `Uploading ${this.file.name} (${formatBytes(this.file.size)})…`, "");
+				uploadProgressBar.style.width = "50%";
+				uploadProgressLabel.textContent = `… · ${formatBytes(this.file.size)}`;
+				await this.uploadSimple(this.file);
+				uploadProgressBar.style.width = "100%";
+				uploadProgressLabel.textContent = `100% · ${formatBytes(this.file.size)} / ${formatBytes(this.file.size)}`;
+			} else {
+				await this.uploadMultipart();
+			}
+			if (this.state === "cancelled") return;
+			const doneName = this.file.name;
+			this.state = "done";
+			uploadProgressBar.style.width = "100%";
+			uploadProgressLabel.textContent = `100% · ${formatBytes(this.file.size)} / ${formatBytes(this.file.size)}`;
+			setStatus(uploadStatus, `Uploaded ${doneName}.`, "ok");
+			uploadPauseBtn.classList.add("hidden");
+			uploadResumeBtn.classList.add("hidden");
+			uploadRetryBtn.classList.add("hidden");
+			uploadCancelBtn.disabled = true;
+			browseBtn.disabled = this.queue.length > 0;
+			await refresh();
+			this.file = null;
+			this.key = "";
+			this.uploadId = "";
+			this.parts.clear();
+			this.nextPart = 1;
+			this.busy = false;
+			this.state = "idle";
+			this.drainQueue();
+		} catch (err) {
+			if (this.state === "cancelled") {
+				this.busy = false;
+				this.drainQueue();
+				return;
+			}
+			if (this.state === "paused" || err?.name === "AbortError") {
+				this.state = "paused";
+				setStatus(uploadStatus, "Paused.", "");
+				this.setControls();
+				try {
+					await this.waitIfPaused();
+					if (this.state === "cancelled") {
+						this.busy = false;
+						this.drainQueue();
+						return;
+					}
+					this.state = "running";
+					this.setControls();
+					await this.runCurrent();
+				} catch (inner) {
+					if (this.state === "cancelled") {
+						this.busy = false;
+						this.drainQueue();
+						return;
+					}
+					this.state = "error";
+					setStatus(uploadStatus, inner.message || "Upload failed", "error");
+					this.setControls();
+				}
+				return;
+			}
+			this.state = "error";
+			setStatus(uploadStatus, err.message || "Upload failed", "error");
+			this.setControls();
+		}
+	}
+
+	async uploadSimple(file) {
+		const body = new FormData();
+		body.append("file", file, file.name);
+		this.abortController = new AbortController();
+		const res = await fetch("/api/upload", { method: "POST", body, signal: this.abortController.signal });
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+	}
+
+	async uploadMultipart() {
+		if (!this.file) return;
+		if (!this.uploadId) {
+			setStatus(uploadStatus, `Starting multipart for ${this.file.name}…`, "");
+			const created = await api("/api/multipart/create", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					key: this.file.name,
+					contentType: this.file.type || "application/octet-stream",
+					originalName: this.file.name,
+				}),
+			});
+			this.key = created.key;
+			this.uploadId = created.uploadId;
+		}
+
+		while (this.nextPart <= this.totalParts) {
+			await this.waitIfPaused();
+			if (this.state === "cancelled") throw new Error("Upload cancelled");
+
+			const partNumber = this.nextPart;
+			if (this.parts.has(partNumber)) {
+				this.nextPart += 1;
+				this.updateProgress();
+				continue;
+			}
+
+			const start = (partNumber - 1) * PART_SIZE;
+			const end = Math.min(start + PART_SIZE, this.file.size);
+			const blob = this.file.slice(start, end);
+			const qs = new URLSearchParams({
+				key: this.key,
+				uploadId: this.uploadId,
+				partNumber: String(partNumber),
+			});
+
+			this.abortController = new AbortController();
+			setStatus(
+				uploadStatus,
+				`Uploading part ${partNumber}/${this.totalParts}…`,
+				"",
+			);
+
+			let res;
+			try {
+				res = await fetch(`/api/multipart/part?${qs}`, {
+					method: "PUT",
+					headers: { "Content-Type": "application/octet-stream" },
+					body: blob,
+					signal: this.abortController.signal,
+				});
+			} catch (err) {
+				if (this.state === "paused" || err?.name === "AbortError") {
+					this.state = "paused";
+					this.setControls();
+					throw err;
+				}
+				throw err;
+			}
+
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error || `Part ${partNumber} failed (${res.status})`);
+
+			this.parts.set(partNumber, { partNumber: data.partNumber, etag: data.etag });
+			this.nextPart = partNumber + 1;
+			this.updateProgress();
+		}
+
+		await this.waitIfPaused();
+		if (this.state === "cancelled") throw new Error("Upload cancelled");
+
+		const parts = [...this.parts.values()].sort((a, b) => a.partNumber - b.partNumber);
+		setStatus(uploadStatus, "Finalizing upload…", "");
+		await api("/api/multipart/complete", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ key: this.key, uploadId: this.uploadId, parts }),
+		});
+	}
+}
+
+const uploader = new UploadController();
+uploader.setControls();
+
+uploadPauseBtn.addEventListener("click", () => uploader.pause());
+uploadResumeBtn.addEventListener("click", () => uploader.resume());
+uploadRetryBtn.addEventListener("click", () => uploader.retry());
+uploadCancelBtn.addEventListener("click", () => uploader.cancel());
 
 function renderObjects(objects) {
 	objectList.innerHTML = "";
@@ -171,126 +504,14 @@ async function refresh() {
 	}
 }
 
-/** 10 MiB parts — above R2's 5 MiB minimum, under the ~100 MiB Worker request limit. */
-const PART_SIZE = 10 * 1024 * 1024;
-const SIMPLE_UPLOAD_MAX = 20 * 1024 * 1024;
-
-function formatBytes(n) {
-	if (n < 1024) return `${n} B`;
-	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-	if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-	return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
-
-async function uploadFileSimple(file) {
-	const body = new FormData();
-	body.append("file", file, file.name);
-	await api("/api/upload", { method: "POST", body });
-}
-
-async function uploadFileMultipart(file, onProgress) {
-	const created = await api("/api/multipart/create", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			key: file.name,
-			contentType: file.type || "application/octet-stream",
-			originalName: file.name,
-		}),
-	});
-
-	const { key, uploadId } = created;
-	const totalParts = Math.max(1, Math.ceil(file.size / PART_SIZE));
-	const parts = [];
-
-	try {
-		for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
-			const start = (partNumber - 1) * PART_SIZE;
-			const end = Math.min(start + PART_SIZE, file.size);
-			const blob = file.slice(start, end);
-			const qs = new URLSearchParams({
-				key,
-				uploadId,
-				partNumber: String(partNumber),
-			});
-			const res = await fetch(`/api/multipart/part?${qs}`, {
-				method: "PUT",
-				headers: { "Content-Type": "application/octet-stream" },
-				body: blob,
-			});
-			const data = await res.json().catch(() => ({}));
-			if (!res.ok) throw new Error(data.error || `Part ${partNumber} failed (${res.status})`);
-			parts.push({ partNumber: data.partNumber, etag: data.etag });
-			if (onProgress) onProgress(partNumber, totalParts, end, file.size);
-		}
-
-		await api("/api/multipart/complete", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ key, uploadId, parts }),
-		});
-	} catch (err) {
-		try {
-			await api("/api/multipart/abort", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ key, uploadId }),
-			});
-		} catch {
-			/* ignore abort errors */
-		}
-		throw err;
-	}
-}
-
-async function uploadOneFile(file, index, total) {
-	const label = total > 1 ? `(${index + 1}/${total}) ` : "";
-	if (file.size <= SIMPLE_UPLOAD_MAX) {
-		setStatus(uploadStatus, `${label}Uploading ${file.name} (${formatBytes(file.size)})…`);
-		await uploadFileSimple(file);
-		return;
-	}
-
-	await uploadFileMultipart(file, (partNumber, totalParts, bytesDone, bytesTotal) => {
-		const pct = Math.min(100, Math.round((bytesDone / bytesTotal) * 100));
-		setStatus(
-			uploadStatus,
-			`${label}Uploading ${file.name}: part ${partNumber}/${totalParts} (${pct}%, ${formatBytes(bytesDone)} / ${formatBytes(bytesTotal)})`,
-		);
-	});
-}
-
-async function uploadFiles(files) {
+function startUploads(files) {
 	if (!files?.length || me?.role !== "owner") return;
-	const list = [...files];
-	setStatus(uploadStatus, `Preparing ${list.length} file${list.length === 1 ? "" : "s"}…`);
-
-	let ok = 0;
-	const errors = [];
-	for (let i = 0; i < list.length; i++) {
-		try {
-			await uploadOneFile(list[i], i, list.length);
-			ok += 1;
-		} catch (err) {
-			errors.push(`${list[i].name}: ${err.message || String(err)}`);
-		}
-	}
-
-	if (errors.length) {
-		setStatus(
-			uploadStatus,
-			`Uploaded ${ok}/${list.length}. ${errors[0]}${errors.length > 1 ? ` (+${errors.length - 1} more)` : ""}`,
-			ok ? "ok" : "error",
-		);
-	} else {
-		setStatus(uploadStatus, `Uploaded ${ok} file${ok === 1 ? "" : "s"}.`, "ok");
-	}
+	uploader.enqueue([...files]);
 	fileInput.value = "";
-	await refresh();
 }
 
 browseBtn.addEventListener("click", () => fileInput.click());
-fileInput.addEventListener("change", () => uploadFiles(fileInput.files));
+fileInput.addEventListener("change", () => startUploads(fileInput.files));
 
 ["dragenter", "dragover"].forEach((eventName) => {
 	dropzone.addEventListener(eventName, (event) => {
@@ -304,7 +525,7 @@ fileInput.addEventListener("change", () => uploadFiles(fileInput.files));
 		dropzone.classList.remove("is-dragging");
 	});
 });
-dropzone.addEventListener("drop", (event) => uploadFiles(event.dataTransfer?.files));
+dropzone.addEventListener("drop", (event) => startUploads(event.dataTransfer?.files));
 
 objectList.addEventListener("click", async (event) => {
 	const target = event.target;
@@ -317,6 +538,7 @@ objectList.addEventListener("click", async (event) => {
 		const encoded = encodeURIComponent(key).replaceAll("%2F", "/");
 		await api(`/api/objects/${encoded}`, { method: "DELETE" });
 		setStatus(uploadStatus, `Deleted ${key}.`, "ok");
+		uploadPanel.classList.remove("hidden");
 		await refresh();
 	} catch (err) {
 		setStatus(uploadStatus, err.message || "Delete failed", "error");
@@ -413,4 +635,5 @@ async function boot() {
 boot().catch((err) => {
 	lede.textContent = err.message || "Could not load Vybe.";
 	setStatus(uploadStatus, err.message || "Startup failed", "error");
+	uploadPanel.classList.remove("hidden");
 });
