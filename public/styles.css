@@ -317,6 +317,106 @@ body {
 	border: 0;
 }
 
+.pill {
+	display: inline-flex;
+	align-items: center;
+	padding: 0.35rem 0.7rem;
+	border-radius: 999px;
+	background: rgba(15, 118, 110, 0.12);
+	color: var(--accent-ink);
+	font-size: 0.85rem;
+	font-weight: 600;
+	margin-right: 0.5rem;
+}
+
+.section-hint {
+	margin: 0 0 1rem;
+	color: var(--muted);
+	font-size: 0.95rem;
+}
+
+.friends {
+	margin-top: 2.5rem;
+	animation: rise 0.85s ease both;
+}
+
+.friend-list {
+	display: grid;
+	gap: 0.65rem;
+}
+
+.friend-card,
+.friend-form {
+	padding: 1rem;
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	box-shadow: 0 8px 24px rgba(18, 32, 42, 0.04);
+}
+
+.friend-card {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	gap: 0.85rem;
+	align-items: center;
+}
+
+.friend-name {
+	margin: 0;
+	font-weight: 600;
+}
+
+.friend-form {
+	display: grid;
+	gap: 0.65rem;
+	margin-top: 1rem;
+}
+
+.friend-form h3 {
+	margin: 0;
+}
+
+.friend-form input[type="text"],
+.friend-form input[type="password"] {
+	width: 100%;
+	padding: 0.7rem 0.85rem;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	font: inherit;
+	background: #fff;
+}
+
+.field-hint {
+	margin: 0;
+	color: var(--muted);
+	font-size: 0.85rem;
+}
+
+.file-picks {
+	display: grid;
+	gap: 0.4rem;
+	max-height: 220px;
+	overflow: auto;
+	padding: 0.5rem;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.65);
+}
+
+.pick {
+	display: flex;
+	gap: 0.55rem;
+	align-items: flex-start;
+	font-family: var(--mono);
+	font-size: 0.85rem;
+}
+
+.form-actions {
+	display: flex;
+	gap: 0.5rem;
+	flex-wrap: wrap;
+}
+
 @keyframes rise {
 	from {
 		opacity: 0;
@@ -334,6 +434,11 @@ body {
 	}
 
 	.object-row {
+		grid-template-columns: 1fr;
+	}
+
+	.object-actions,
+	.friend-card {
 		grid-template-columns: 1fr;
 	}
 

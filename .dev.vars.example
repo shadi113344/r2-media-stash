@@ -1,2 +1,5 @@
 # Copy to .dev.vars for local `npm run dev` (never commit .dev.vars)
-SHARE_PASSWORD=local-dev-only-change-me
+# Preferred owner/admin password:
+OWNER_PASSWORD=local-owner-only-change-me
+# Legacy alias still accepted if OWNER_PASSWORD is unset:
+# SHARE_PASSWORD=local-owner-only-change-me

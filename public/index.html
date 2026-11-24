@@ -17,11 +17,14 @@
 		<main class="shell">
 			<header class="brand">
 				<p class="mark">Vybe</p>
-				<p class="lede">Share files and videos with a friend — unlock with the shared password.</p>
-				<p class="brand-actions"><a class="btn ghost" href="/api/logout">Lock</a></p>
+				<p id="lede" class="lede">Loading…</p>
+				<p class="brand-actions">
+					<span id="role-pill" class="pill hidden"></span>
+					<a class="btn ghost" href="/api/logout">Lock</a>
+				</p>
 			</header>
 
-			<section class="upload" aria-labelledby="upload-heading">
+			<section id="upload-section" class="upload hidden" aria-labelledby="upload-heading">
 				<h1 id="upload-heading" class="sr-only">Upload</h1>
 				<form id="upload-form" class="dropzone" novalidate>
 					<input id="file-input" type="file" multiple accept="*/*" hidden />
@@ -36,11 +39,44 @@
 
 			<section class="library" aria-labelledby="library-heading">
 				<div class="library-head">
-					<h2 id="library-heading">Stored objects</h2>
+					<h2 id="library-heading">Your files</h2>
 					<button type="button" id="refresh-btn" class="btn ghost">Refresh</button>
 				</div>
 				<div id="object-list" class="object-list"></div>
-				<p id="empty-state" class="empty hidden">No objects in the bucket yet.</p>
+				<p id="empty-state" class="empty hidden">No files yet.</p>
+			</section>
+
+			<section id="friends-section" class="friends hidden" aria-labelledby="friends-heading">
+				<div class="library-head">
+					<h2 id="friends-heading">Friends</h2>
+					<button type="button" id="friend-new-btn" class="btn primary">Add friend</button>
+				</div>
+				<p class="section-hint">Each friend gets their own password and only sees the files you assign.</p>
+				<div id="friend-list" class="friend-list"></div>
+				<p id="friends-empty" class="empty hidden">No friends yet. Add one to share specific files.</p>
+
+				<form id="friend-form" class="friend-form hidden">
+					<h3 id="friend-form-title">Add friend</h3>
+					<input type="hidden" id="friend-id" value="" />
+					<label class="login-label" for="friend-label">Name</label>
+					<input id="friend-label" type="text" required maxlength="80" placeholder="Alex" />
+					<label class="login-label" for="friend-password">Password</label>
+					<input
+						id="friend-password"
+						type="password"
+						minlength="4"
+						autocomplete="new-password"
+						placeholder="Unique password for this friend"
+					/>
+					<p id="friend-password-hint" class="field-hint">Required for new friends. Leave blank when editing to keep the current password.</p>
+					<p class="login-label">Assigned files</p>
+					<div id="friend-file-picks" class="file-picks"></div>
+					<div class="form-actions">
+						<button type="submit" class="btn primary" id="friend-save-btn">Save friend</button>
+						<button type="button" class="btn ghost" id="friend-cancel-btn">Cancel</button>
+					</div>
+					<p id="friend-form-status" class="status" role="status"></p>
+				</form>
 			</section>
 		</main>
 		<script src="/app.js" type="module"></script>
