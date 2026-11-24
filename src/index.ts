@@ -73,7 +73,7 @@ function loginPageHtml(error: string | null, configured: boolean): string {
 	const err = error
 		? `<p class="status error">${error}</p>`
 		: configured
-			? `<p class="status">Owner or friend password unlocks your share.</p>`
+			? `<p class="status">Enter your password to unlock this share.</p>`
 			: `<p class="status error">Owner password is not configured. Set <code>OWNER_PASSWORD</code> (or legacy <code>SHARE_PASSWORD</code>) with Wrangler.</p>`;
 
 	return `<!DOCTYPE html>

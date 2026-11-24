@@ -1033,10 +1033,10 @@ document.addEventListener("keydown", (event) => {
 
 async function boot() {
 	me = await api("/api/me");
-	rolePill.textContent = me.role === "owner" ? "Owner" : "Friend";
-	rolePill.classList.remove("hidden");
 
 	if (me.role === "owner") {
+		rolePill.textContent = "Owner";
+		rolePill.classList.remove("hidden");
 		heroKicker.textContent = "Your library";
 		heroTitle.textContent = "Vybe";
 		lede.textContent = "Upload media, assign files to friends, and stream what browsers can play.";
@@ -1044,8 +1044,9 @@ async function boot() {
 		uploadSection.classList.remove("hidden");
 		friendsSection.classList.remove("hidden");
 	} else {
+		rolePill.classList.add("hidden");
 		heroKicker.textContent = "Shared with you";
-		heroTitle.textContent = me.label || "Friend";
+		heroTitle.textContent = me.label || "Library";
 		lede.textContent = "Browse your shared media — play videos, view images, or download anything.";
 		libraryHeading.textContent = "Your media";
 	}
