@@ -16,7 +16,10 @@ import {
 	type FriendRecord,
 } from "./config";
 
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+/** Single-request upload ceiling (Workers body limit is ~100 MiB). Larger files use /api/multipart/*. */
+const SIMPLE_UPLOAD_MAX_BYTES = 90 * 1024 * 1024;
+/** Soft guidance for clients — R2 multipart supports up to 10k parts. */
+const MULTIPART_PART_MAX_BYTES = 90 * 1024 * 1024;
 
 function json(data: unknown, status = 200): Response {
 	return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
@@ -140,7 +143,7 @@ async function listObjects(env: Env, session: Session): Promise<Response> {
 async function uploadObject(request: Request, env: Env): Promise<Response> {
 	const contentType = request.headers.get("content-type") ?? "";
 	if (!contentType.includes("multipart/form-data")) {
-		return badRequest("Expected multipart upload");
+		return badRequest("Expected multipart form upload");
 	}
 
 	const form = await request.formData();
@@ -154,8 +157,15 @@ async function uploadObject(request: Request, env: Env): Promise<Response> {
 	if (!key) return badRequest("Invalid object key");
 	if (isReservedKey(key)) return badRequest("Reserved key");
 
-	if (file.size > MAX_UPLOAD_BYTES) {
-		return badRequest(`File exceeds ${formatBytes(MAX_UPLOAD_BYTES)} limit`);
+	if (file.size > SIMPLE_UPLOAD_MAX_BYTES) {
+		return json(
+			{
+				error: `File is too large for a single request (${formatBytes(file.size)}). Use chunked multipart upload.`,
+				useMultipart: true,
+				maxSimpleBytes: SIMPLE_UPLOAD_MAX_BYTES,
+			},
+			413,
+		);
 	}
 
 	const put = await env.MEDIA.put(key, file.stream(), {
@@ -173,6 +183,130 @@ async function uploadObject(request: Request, env: Env): Promise<Response> {
 		},
 		201,
 	);
+}
+
+async function multipartCreate(request: Request, env: Env): Promise<Response> {
+	const body = (await request.json()) as {
+		key?: string;
+		contentType?: string;
+		originalName?: string;
+	};
+	const key = sanitizeKey(body.key ?? "");
+	if (!key) return badRequest("key is required");
+	if (isReservedKey(key)) return badRequest("Reserved key");
+
+	const contentType =
+		typeof body.contentType === "string" && body.contentType
+			? body.contentType
+			: "application/octet-stream";
+	const originalName =
+		typeof body.originalName === "string" && body.originalName.trim()
+			? body.originalName.trim()
+			: key.split("/").pop() || key;
+
+	const upload = await env.MEDIA.createMultipartUpload(key, {
+		httpMetadata: { contentType },
+		customMetadata: { originalName },
+	});
+
+	return json(
+		{
+			key: upload.key,
+			uploadId: upload.uploadId,
+			partSizeHint: 10 * 1024 * 1024,
+			maxPartBytes: MULTIPART_PART_MAX_BYTES,
+		},
+		201,
+	);
+}
+
+async function multipartUploadPart(request: Request, env: Env, url: URL): Promise<Response> {
+	const key = sanitizeKey(url.searchParams.get("key") ?? "");
+	const uploadId = url.searchParams.get("uploadId") ?? "";
+	const partNumber = Number(url.searchParams.get("partNumber"));
+	if (!key || isReservedKey(key)) return badRequest("Invalid key");
+	if (!uploadId) return badRequest("uploadId is required");
+	if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000) {
+		return badRequest("partNumber must be an integer from 1 to 10000");
+	}
+	if (!request.body) return badRequest("Missing body");
+
+	const lengthHeader = request.headers.get("content-length");
+	if (lengthHeader && Number(lengthHeader) > MULTIPART_PART_MAX_BYTES) {
+		return badRequest(`Part exceeds ${formatBytes(MULTIPART_PART_MAX_BYTES)} Worker body limit`);
+	}
+
+	const upload = env.MEDIA.resumeMultipartUpload(key, uploadId);
+	try {
+		// Prefer a known-length body for R2 uploadPart
+		const bytes = await request.arrayBuffer();
+		if (bytes.byteLength === 0) return badRequest("Empty part");
+		if (bytes.byteLength > MULTIPART_PART_MAX_BYTES) {
+			return badRequest(`Part exceeds ${formatBytes(MULTIPART_PART_MAX_BYTES)} Worker body limit`);
+		}
+		const part = await upload.uploadPart(partNumber, bytes);
+		return json({ etag: part.etag, partNumber: part.partNumber });
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return json({ error: message }, 400);
+	}
+}
+
+async function multipartComplete(request: Request, env: Env): Promise<Response> {
+	const body = (await request.json()) as {
+		key?: string;
+		uploadId?: string;
+		parts?: Array<{ partNumber?: number; etag?: string }>;
+	};
+	const key = sanitizeKey(body.key ?? "");
+	const uploadId = typeof body.uploadId === "string" ? body.uploadId : "";
+	if (!key || isReservedKey(key)) return badRequest("Invalid key");
+	if (!uploadId) return badRequest("uploadId is required");
+	if (!Array.isArray(body.parts) || body.parts.length === 0) {
+		return badRequest("parts array is required");
+	}
+
+	const parts: Array<{ partNumber: number; etag: string }> = [];
+	for (const p of body.parts) {
+		const partNumber = Number(p.partNumber);
+		const etag = typeof p.etag === "string" ? p.etag : "";
+		if (!Number.isInteger(partNumber) || partNumber < 1 || !etag) {
+			return badRequest("Each part needs partNumber and etag");
+		}
+		parts.push({ partNumber, etag });
+	}
+
+	const upload = env.MEDIA.resumeMultipartUpload(key, uploadId);
+	try {
+		const object = await upload.complete(parts);
+		return json({
+			key: object.key,
+			size: object.size,
+			etag: object.etag,
+			uploaded: object.uploaded.toISOString(),
+			contentType: object.httpMetadata?.contentType ?? null,
+		});
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return json({ error: message }, 400);
+	}
+}
+
+async function multipartAbort(request: Request, env: Env): Promise<Response> {
+	const body = (await request.json()) as { key?: string; uploadId?: string };
+	const key = sanitizeKey(body.key ?? "");
+	const uploadId = typeof body.uploadId === "string" ? body.uploadId : "";
+	if (!key || isReservedKey(key)) return badRequest("Invalid key");
+	if (!uploadId) return badRequest("uploadId is required");
+
+	const upload = env.MEDIA.resumeMultipartUpload(key, uploadId);
+	try {
+		await upload.abort();
+		return json({ aborted: true, key, uploadId });
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return json({ error: message }, 400);
+	}
 }
 
 async function getObject(env: Env, session: Session, key: string): Promise<Response> {
@@ -417,6 +551,26 @@ export default {
 			if (url.pathname === "/api/upload" && request.method === "POST") {
 				if (session.role !== "owner") return forbidden("Owner only");
 				return uploadObject(request, env);
+			}
+
+			if (url.pathname === "/api/multipart/create" && request.method === "POST") {
+				if (session.role !== "owner") return forbidden("Owner only");
+				return multipartCreate(request, env);
+			}
+
+			if (url.pathname === "/api/multipart/part" && request.method === "PUT") {
+				if (session.role !== "owner") return forbidden("Owner only");
+				return multipartUploadPart(request, env, url);
+			}
+
+			if (url.pathname === "/api/multipart/complete" && request.method === "POST") {
+				if (session.role !== "owner") return forbidden("Owner only");
+				return multipartComplete(request, env);
+			}
+
+			if (url.pathname === "/api/multipart/abort" && request.method === "POST") {
+				if (session.role !== "owner") return forbidden("Owner only");
+				return multipartAbort(request, env);
 			}
 
 			if (url.pathname === "/api/friends" && request.method === "GET") {

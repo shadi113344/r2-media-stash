@@ -171,21 +171,108 @@ async function refresh() {
 	}
 }
 
+/** 10 MiB parts — above R2's 5 MiB minimum, under the ~100 MiB Worker request limit. */
+const PART_SIZE = 10 * 1024 * 1024;
+const SIMPLE_UPLOAD_MAX = 20 * 1024 * 1024;
+
+function formatBytes(n) {
+	if (n < 1024) return `${n} B`;
+	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+	if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+	return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+async function uploadFileSimple(file) {
+	const body = new FormData();
+	body.append("file", file, file.name);
+	await api("/api/upload", { method: "POST", body });
+}
+
+async function uploadFileMultipart(file, onProgress) {
+	const created = await api("/api/multipart/create", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			key: file.name,
+			contentType: file.type || "application/octet-stream",
+			originalName: file.name,
+		}),
+	});
+
+	const { key, uploadId } = created;
+	const totalParts = Math.max(1, Math.ceil(file.size / PART_SIZE));
+	const parts = [];
+
+	try {
+		for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+			const start = (partNumber - 1) * PART_SIZE;
+			const end = Math.min(start + PART_SIZE, file.size);
+			const blob = file.slice(start, end);
+			const qs = new URLSearchParams({
+				key,
+				uploadId,
+				partNumber: String(partNumber),
+			});
+			const res = await fetch(`/api/multipart/part?${qs}`, {
+				method: "PUT",
+				headers: { "Content-Type": "application/octet-stream" },
+				body: blob,
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error || `Part ${partNumber} failed (${res.status})`);
+			parts.push({ partNumber: data.partNumber, etag: data.etag });
+			if (onProgress) onProgress(partNumber, totalParts, end, file.size);
+		}
+
+		await api("/api/multipart/complete", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ key, uploadId, parts }),
+		});
+	} catch (err) {
+		try {
+			await api("/api/multipart/abort", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ key, uploadId }),
+			});
+		} catch {
+			/* ignore abort errors */
+		}
+		throw err;
+	}
+}
+
+async function uploadOneFile(file, index, total) {
+	const label = total > 1 ? `(${index + 1}/${total}) ` : "";
+	if (file.size <= SIMPLE_UPLOAD_MAX) {
+		setStatus(uploadStatus, `${label}Uploading ${file.name} (${formatBytes(file.size)})…`);
+		await uploadFileSimple(file);
+		return;
+	}
+
+	await uploadFileMultipart(file, (partNumber, totalParts, bytesDone, bytesTotal) => {
+		const pct = Math.min(100, Math.round((bytesDone / bytesTotal) * 100));
+		setStatus(
+			uploadStatus,
+			`${label}Uploading ${file.name}: part ${partNumber}/${totalParts} (${pct}%, ${formatBytes(bytesDone)} / ${formatBytes(bytesTotal)})`,
+		);
+	});
+}
+
 async function uploadFiles(files) {
 	if (!files?.length || me?.role !== "owner") return;
 	const list = [...files];
-	setStatus(uploadStatus, `Uploading ${list.length} file${list.length === 1 ? "" : "s"}…`);
+	setStatus(uploadStatus, `Preparing ${list.length} file${list.length === 1 ? "" : "s"}…`);
 
 	let ok = 0;
 	const errors = [];
-	for (const file of list) {
-		const body = new FormData();
-		body.append("file", file, file.name);
+	for (let i = 0; i < list.length; i++) {
 		try {
-			await api("/api/upload", { method: "POST", body });
+			await uploadOneFile(list[i], i, list.length);
 			ok += 1;
 		} catch (err) {
-			errors.push(err.message || String(err));
+			errors.push(`${list[i].name}: ${err.message || String(err)}`);
 		}
 	}
 
