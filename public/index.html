@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>R2 Media Stash</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=Figtree:wght@450;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+			rel="stylesheet"
+		/>
+		<link rel="stylesheet" href="/styles.css" />
+	</head>
+	<body>
+		<div class="atmosphere" aria-hidden="true"></div>
+		<main class="shell">
+			<header class="brand">
+				<p class="mark">R2 Media Stash</p>
+				<p class="lede">Upload files and videos to your Cloudflare R2 bucket. List and delete anytime.</p>
+			</header>
+
+			<section class="upload" aria-labelledby="upload-heading">
+				<h1 id="upload-heading" class="sr-only">Upload</h1>
+				<form id="upload-form" class="dropzone" novalidate>
+					<input id="file-input" type="file" multiple accept="*/*" hidden />
+					<div class="dropzone-inner">
+						<p class="dropzone-title">Drop files here or choose to upload</p>
+						<p class="dropzone-hint">Images, videos, documents — up to 100&nbsp;MB each</p>
+						<button type="button" id="browse-btn" class="btn primary">Choose files</button>
+					</div>
+					<div id="upload-status" class="status" role="status" aria-live="polite"></div>
+				</form>
+			</section>
+
+			<section class="library" aria-labelledby="library-heading">
+				<div class="library-head">
+					<h2 id="library-heading">Stored objects</h2>
+					<button type="button" id="refresh-btn" class="btn ghost">Refresh</button>
+				</div>
+				<div id="object-list" class="object-list"></div>
+				<p id="empty-state" class="empty hidden">No objects in the bucket yet.</p>
+			</section>
+		</main>
+		<script src="/app.js" type="module"></script>
+	</body>
+</html>

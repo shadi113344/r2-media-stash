@@ -1,0 +1,16 @@
+{
+  "name": "r2-media-stash",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Simple Cloudflare Workers app to upload, list, and delete files in an R2 bucket",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "wrangler": "^4.168.0"
+  }
+}
