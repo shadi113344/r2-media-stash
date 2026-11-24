@@ -7,7 +7,7 @@
 		<link rel="preconnect" href="https://fonts.googleapis.com" />
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 		<link
-			href="https://fonts.googleapis.com/css2?family=Figtree:wght@450;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+			href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
 			rel="stylesheet"
 		/>
 		<link rel="stylesheet" href="/styles.css" />
@@ -15,22 +15,27 @@
 	<body>
 		<div class="atmosphere" aria-hidden="true"></div>
 		<main class="shell">
-			<header class="brand">
-				<p class="mark">Vybe</p>
-				<p id="lede" class="lede">Loading…</p>
-				<p class="brand-actions">
+			<header class="topbar">
+				<div class="brand-lockup">
+					<p class="brand-mark">Vybe</p>
 					<span id="role-pill" class="pill hidden"></span>
-					<a class="btn ghost" href="/api/logout">Lock</a>
-				</p>
+				</div>
+				<a class="btn ghost" href="/api/logout">Lock</a>
 			</header>
 
+			<section class="hero">
+				<p id="hero-kicker" class="hero-kicker">Shared library</p>
+				<h1 id="hero-title" class="hero-title">Loading…</h1>
+				<p id="lede" class="lede"></p>
+			</section>
+
 			<section id="upload-section" class="upload hidden" aria-labelledby="upload-heading">
-				<h1 id="upload-heading" class="sr-only">Upload</h1>
+				<h2 id="upload-heading" class="section-title">Upload</h2>
 				<form id="upload-form" class="dropzone" novalidate>
 					<input id="file-input" type="file" multiple accept="*/*" hidden />
 					<div class="dropzone-inner">
-						<p class="dropzone-title">Drop files here or choose to upload</p>
-						<p class="dropzone-hint">Images, videos, documents — large files upload in chunks (multi‑GB supported)</p>
+						<p class="dropzone-title">Drop media here or choose files</p>
+						<p class="dropzone-hint">Videos, images, documents — large files upload in chunks</p>
 						<button type="button" id="browse-btn" class="btn primary">Choose files</button>
 					</div>
 					<div id="upload-panel" class="upload-panel hidden" aria-live="polite">
@@ -54,16 +59,16 @@
 
 			<section class="library" aria-labelledby="library-heading">
 				<div class="library-head">
-					<h2 id="library-heading">Your files</h2>
+					<h2 id="library-heading" class="section-title">Library</h2>
 					<button type="button" id="refresh-btn" class="btn ghost">Refresh</button>
 				</div>
-				<div id="object-list" class="object-list"></div>
+				<div id="media-grid" class="media-grid"></div>
 				<p id="empty-state" class="empty hidden">No files yet.</p>
 			</section>
 
 			<section id="friends-section" class="friends hidden" aria-labelledby="friends-heading">
 				<div class="library-head">
-					<h2 id="friends-heading">Friends</h2>
+					<h2 id="friends-heading" class="section-title">Friends</h2>
 					<button type="button" id="friend-new-btn" class="btn primary">Add friend</button>
 				</div>
 				<p class="section-hint">Each friend gets their own password and only sees the files you assign.</p>
@@ -74,7 +79,7 @@
 					<h3 id="friend-form-title">Add friend</h3>
 					<input type="hidden" id="friend-id" value="" />
 					<label class="login-label" for="friend-label">Name</label>
-					<input id="friend-label" type="text" required maxlength="80" placeholder="Alex" />
+					<input id="friend-label" type="text" required maxlength="80" placeholder="Sara" />
 					<label class="login-label" for="friend-password">Password</label>
 					<input
 						id="friend-password"
@@ -94,6 +99,25 @@
 				</form>
 			</section>
 		</main>
+
+		<dialog id="player-modal" class="player-modal">
+			<div class="player-shell">
+				<header class="player-header">
+					<div>
+						<p id="player-title" class="player-title"></p>
+						<p id="player-meta" class="player-meta"></p>
+					</div>
+					<button type="button" id="player-close" class="btn ghost">Close</button>
+				</header>
+				<div id="player-stage" class="player-stage"></div>
+				<p id="player-note" class="player-note hidden"></p>
+				<footer class="player-actions">
+					<a id="player-download" class="btn primary" download>Download</a>
+					<button type="button" id="player-copy" class="btn ghost">Copy link</button>
+				</footer>
+			</div>
+		</dialog>
+
 		<script src="/app.js" type="module"></script>
 	</body>
 </html>

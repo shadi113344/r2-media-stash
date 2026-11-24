@@ -10,8 +10,11 @@ import {
 import {
 	isReservedKey,
 	loadConfig,
+	objectKeyFromThumbKey,
 	publicFriend,
 	saveConfig,
+	THUMB_PREFIX,
+	thumbKeyFor,
 	type AppConfig,
 	type FriendRecord,
 } from "./config";
@@ -81,15 +84,15 @@ function loginPageHtml(error: string | null, configured: boolean): string {
   <title>Unlock — Vybe</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@450;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
-  <main class="shell login-shell">
+  <main class="login-shell">
     <header class="brand">
       <p class="mark">Vybe</p>
-      <p class="lede">Private file and video sharing.</p>
+      <p class="lede">Private media sharing.</p>
     </header>
     <form class="login-card" method="post" action="/api/login">
       <label class="login-label" for="password">Password</label>
@@ -102,15 +105,20 @@ function loginPageHtml(error: string | null, configured: boolean): string {
 </html>`;
 }
 
-function mapObject(obj: R2Object) {
+function mapObject(obj: R2Object, hasThumbnail: boolean) {
+	const name = obj.customMetadata?.originalName || obj.key.split("/").pop() || obj.key;
 	return {
 		key: obj.key,
+		name,
 		size: obj.size,
 		sizeLabel: formatBytes(obj.size),
 		uploaded: obj.uploaded.toISOString(),
 		etag: obj.etag,
 		httpEtag: obj.httpEtag,
 		contentType: obj.httpMetadata?.contentType ?? null,
+		hasThumbnail,
+		thumbnailUrl: hasThumbnail ? `/api/thumbnails/${encodeURIComponent(obj.key)}` : null,
+		mediaUrl: `/api/objects/${encodeURIComponent(obj.key).replaceAll("%2F", "/")}`,
 	};
 }
 
@@ -131,13 +139,52 @@ async function listAllMedia(env: Env): Promise<R2Object[]> {
 	return objects;
 }
 
+async function listThumbKeys(env: Env): Promise<Set<string>> {
+	const keys = new Set<string>();
+	let cursor: string | undefined;
+	do {
+		const listed = await env.MEDIA.list({ prefix: THUMB_PREFIX, limit: 1000, cursor });
+		for (const obj of listed.objects) {
+			const objectKey = objectKeyFromThumbKey(obj.key);
+			if (objectKey) keys.add(objectKey);
+		}
+		cursor = listed.truncated ? listed.cursor : undefined;
+	} while (cursor);
+	return keys;
+}
+
 async function listObjects(env: Env, session: Session): Promise<Response> {
-	const all = await listAllMedia(env);
+	const [all, thumbs] = await Promise.all([listAllMedia(env), listThumbKeys(env)]);
 	const filtered =
 		session.role === "owner"
 			? all
 			: all.filter((obj) => session.objectKeys.includes(obj.key));
-	return json({ objects: filtered.map(mapObject), truncated: false, cursor: null });
+	return json({
+		objects: filtered.map((obj) => mapObject(obj, thumbs.has(obj.key))),
+		truncated: false,
+		cursor: null,
+	});
+}
+
+function parseRangeHeader(header: string | null, size: number): { offset: number; length: number } | null {
+	if (!header) return null;
+	const match = /^bytes=(\d*)-(\d*)$/i.exec(header.trim());
+	if (!match) return null;
+	const startStr = match[1];
+	const endStr = match[2];
+	if (startStr === "" && endStr === "") return null;
+	if (startStr === "") {
+		const suffix = Number(endStr);
+		if (!Number.isFinite(suffix) || suffix <= 0) return null;
+		const length = Math.min(suffix, size);
+		return { offset: Math.max(0, size - length), length };
+	}
+	const start = Number(startStr);
+	if (!Number.isFinite(start) || start < 0 || start >= size) return null;
+	const end = endStr === "" ? size - 1 : Number(endStr);
+	if (!Number.isFinite(end) || end < start) return null;
+	const clampedEnd = Math.min(end, size - 1);
+	return { offset: start, length: clampedEnd - start + 1 };
 }
 
 async function uploadObject(request: Request, env: Env): Promise<Response> {
@@ -309,10 +356,31 @@ async function multipartAbort(request: Request, env: Env): Promise<Response> {
 	}
 }
 
-async function getObject(env: Env, session: Session, key: string): Promise<Response> {
+async function getObject(request: Request, env: Env, session: Session, key: string): Promise<Response> {
 	if (isReservedKey(key)) return notFound("Object not found");
 	if (session.role === "friend" && !session.objectKeys.includes(key)) {
 		return forbidden("Not assigned to you");
+	}
+
+	const head = await env.MEDIA.head(key);
+	if (!head) return notFound("Object not found");
+
+	const filename = head.customMetadata?.originalName || key.split("/").pop() || key;
+	const range = parseRangeHeader(request.headers.get("Range"), head.size);
+
+	if (range) {
+		const object = await env.MEDIA.get(key, { range });
+		if (!object) return notFound("Object not found");
+		const headers = new Headers();
+		object.writeHttpMetadata(headers);
+		headers.set("etag", object.httpEtag);
+		headers.set("Accept-Ranges", "bytes");
+		headers.set("Cache-Control", "private, max-age=60");
+		headers.set("Content-Disposition", `inline; filename="${filename.replaceAll('"', "")}"`);
+		const end = range.offset + range.length - 1;
+		headers.set("Content-Range", `bytes ${range.offset}-${end}/${head.size}`);
+		headers.set("Content-Length", String(range.length));
+		return new Response(object.body, { status: 206, headers });
 	}
 
 	const object = await env.MEDIA.get(key);
@@ -321,9 +389,49 @@ async function getObject(env: Env, session: Session, key: string): Promise<Respo
 	const headers = new Headers();
 	object.writeHttpMetadata(headers);
 	headers.set("etag", object.httpEtag);
+	headers.set("Accept-Ranges", "bytes");
 	headers.set("Cache-Control", "private, max-age=60");
-	headers.set("Content-Disposition", `inline; filename="${key.split("/").pop()}"`);
+	headers.set("Content-Disposition", `inline; filename="${filename.replaceAll('"', "")}"`);
+	headers.set("Content-Length", String(head.size));
+	return new Response(object.body, { status: 200, headers });
+}
+
+async function getThumbnail(env: Env, session: Session, key: string): Promise<Response> {
+	if (isReservedKey(key)) return notFound();
+	if (session.role === "friend" && !session.objectKeys.includes(key)) return forbidden();
+	const thumbKey = thumbKeyFor(key);
+	const object = await env.MEDIA.get(thumbKey);
+	if (!object) return notFound("Thumbnail not found");
+	const headers = new Headers();
+	object.writeHttpMetadata(headers);
+	headers.set("Cache-Control", "private, max-age=3600");
+	headers.set("Content-Type", object.httpMetadata?.contentType || "image/jpeg");
 	return new Response(object.body, { headers });
+}
+
+async function putThumbnail(request: Request, env: Env): Promise<Response> {
+	const contentType = request.headers.get("content-type") ?? "";
+	if (!contentType.includes("multipart/form-data")) {
+		return badRequest("Expected multipart form with file + key");
+	}
+	const form = await request.formData();
+	const keyRaw = form.get("key");
+	const file = form.get("file");
+	if (typeof keyRaw !== "string") return badRequest("key required");
+	const key = sanitizeKey(keyRaw);
+	if (!key || isReservedKey(key)) return badRequest("Invalid key");
+	if (!(file instanceof File)) return badRequest("file required");
+	if (file.size > 2 * 1024 * 1024) return badRequest("Thumbnail too large");
+
+	const existing = await env.MEDIA.head(key);
+	if (!existing) return notFound("Object not found");
+
+	const thumbKey = thumbKeyFor(key);
+	await env.MEDIA.put(thumbKey, file.stream(), {
+		httpMetadata: { contentType: file.type || "image/jpeg" },
+		customMetadata: { forKey: key },
+	});
+	return json({ key, thumbnailUrl: `/api/thumbnails/${encodeURIComponent(key)}` }, 201);
 }
 
 async function deleteObject(env: Env, config: AppConfig, key: string): Promise<Response> {
@@ -342,6 +450,7 @@ async function deleteObject(env: Env, config: AppConfig, key: string): Promise<R
 		}
 	}
 	if (changed) await saveConfig(env.MEDIA, config);
+	await env.MEDIA.delete(thumbKeyFor(key));
 
 	return json({ deleted: key });
 }
@@ -600,12 +709,24 @@ export default {
 			if (objectMatch) {
 				const key = sanitizeKey(objectMatch[1]);
 				if (!key) return badRequest("Invalid object key");
-				if (request.method === "GET") return getObject(env, session, key);
+				if (request.method === "GET") return getObject(request, env, session, key);
 				if (request.method === "DELETE") {
 					if (session.role !== "owner") return forbidden("Owner only");
 					return deleteObject(env, config, key);
 				}
 				return json({ error: "Method not allowed" }, 405);
+			}
+
+			const thumbMatch = url.pathname.match(/^\/api\/thumbnails\/(.+)$/);
+			if (thumbMatch && request.method === "GET") {
+				const key = sanitizeKey(thumbMatch[1]);
+				if (!key) return badRequest("Invalid object key");
+				return getThumbnail(env, session, key);
+			}
+
+			if (url.pathname === "/api/thumbnails" && request.method === "POST") {
+				if (session.role !== "owner") return forbidden("Owner only");
+				return putThumbnail(request, env);
 			}
 
 			if (url.pathname.startsWith("/api/")) return notFound("Unknown API route");
